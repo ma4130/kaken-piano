@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>床ピアノ</title>
+<style>
+  :root {
+    --bg: #000;
+    --line: #fff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: var(--bg);
+    overflow: hidden;
+    font-family: "Hiragino Maru Gothic ProN", "BIZ UDPGothic", "Meiryo", system-ui, sans-serif;
+    user-select: none; -webkit-user-select: none;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body.hide-cursor, body.hide-cursor * { cursor: none; }
+
+  /* 投影面。回転させても画面いっぱいに収まるようにする */
+  #stage {
+    position: fixed; left: 50%; top: 50%;
+    width: 100vw; height: 100vh;
+    transform: translate(-50%, -50%);
+    display: flex;
+    gap: 0.6vmin;
+    padding: 0.6vmin;
+    background: var(--bg);
+  }
+  body.rot90 #stage, body.rot270 #stage { width: 100vh; height: 100vw; }
+  body.rot90  #stage { transform: translate(-50%, -50%) rotate(90deg); }
+  body.rot180 #stage { transform: translate(-50%, -50%) rotate(180deg); }
+  body.rot270 #stage { transform: translate(-50%, -50%) rotate(270deg); }
+
+  .key {
+    --c: #fff;
+    position: relative;
+    flex: 1;
+    border-radius: 1.2vmin;
+    background: var(--c);
+    border: 0.8vmin solid var(--c);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: flex-end;
+    padding-bottom: 6%;
+    overflow: hidden;
+    transition: background 0.35s ease-out, transform 0.35s ease-out;
+  }
+  .key.on {
+    background: #fff;
+    transform: scale(0.97);
+    transition: background 0s, transform 0.05s;
+  }
+  .key .name {
+    color: #fff;
+    font-weight: 900;
+    line-height: 1;
+    font-size: var(--name-size, 9vmin);
+    text-shadow: 0 0 1.2vmin rgba(0,0,0,0.6);
+    white-space: nowrap;
+  }
+  .key .dot {
+    position: absolute; top: 6%;
+    width: 40%; aspect-ratio: 1;
+    border-radius: 50%;
+    border: 0.8vmin solid #fff;
+  }
+  .key.on .name { color: #000; text-shadow: none; }
+  .key.on .dot { border-color: var(--c); background: var(--c); }
+
+  /* 「全部白」モード */
+  body.white .key { background: #fff; border-color: #fff; }
+  body.white .key .name { color: #000; text-shadow: none; }
+  body.white .key .dot { border-color: #000; }
+  body.white .key.on { background: #999; }
+  body.white .key.on .dot { border-color: #000; background: #000; }
+
+
+  /* 設定パネル（Esc キーで開く） */
+  #panel {
+    position: fixed; right: 10px; top: 10px; z-index: 16;
+    width: min(380px, calc(100vw - 20px));
+    max-height: calc(100vh - 20px); overflow-y: auto;
+    background: #1b1b1f; color: #eee;
+    border: 1px solid #444; border-radius: 12px;
+    padding: 16px; font-size: 14px; line-height: 1.5;
+    touch-action: auto; user-select: auto;
+    display: none;
+  }
+  #panel.open { display: block; }
+  body.hide-cursor #panel, body.hide-cursor #panel * { cursor: auto; }
+  #panel h2 { font-size: 16px; margin-bottom: 10px; }
+  #panel h3 { font-size: 14px; margin: 16px 0 6px; color: #aaa; }
+  #panel label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; }
+  #panel input[type=range] { width: 170px; }
+  #panel select, #panel button {
+    font: inherit; background: #2c2c33; color: #eee;
+    border: 1px solid #555; border-radius: 6px; padding: 4px 10px; cursor: pointer;
+  }
+  #panel .row { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+  #panel .hint { color: #999; font-size: 12px; }
+  #camPreview { width: 100%; background: #000; border-radius: 6px; margin-top: 8px; display: block; }
+  #camStatus { color: #9cf; font-size: 12px; min-height: 1em; }
+</style>
+</head>
+<body class="hide-cursor">
+
+<div id="stage"></div>
+
+
+<div id="panel">
+  <h2>設定</h2>
+  <div class="row">
+    <button id="fsBtn" type="button">全画面にする</button>
+    <button id="closeBtn" type="button">閉じる</button>
+  </div>
+
+  <h3>表示</h3>
+  <label>向き
+    <select id="rot">
+      <option value="0">そのまま</option>
+      <option value="90">90° 回転</option>
+      <option value="180">180° 回転（逆さま）</option>
+      <option value="270">270° 回転</option>
+    </select>
+  </label>
+  <label>鍵盤の色
+    <select id="keyColor">
+      <option value="color">カラー</option>
+      <option value="white">全部白</option>
+    </select>
+  </label>
+  <label>文字
+    <select id="labelMode">
+      <option value="kata">ド レ ミ（カタカナ）</option>
+      <option value="hira">ど れ み（ひらがな）</option>
+    </select>
+  </label>
+  <label>文字の大きさ <input id="nameSize" type="range" min="4" max="18" step="0.5" value="9"></label>
+  <label>ふんだとき光らせる <input id="glow" type="checkbox" checked></label>
+
+  <h3>音</h3>
+  <label>音量 <input id="vol" type="range" min="0" max="1" step="0.01" value="0.8"></label>
+  <label>音色
+    <select id="tone">
+      <option value="piano">ピアノ</option>
+      <option value="bell">ベル</option>
+      <option value="soft">やわらか</option>
+    </select>
+  </label>
+  <label>連続で鳴る間隔（ms） <input id="cool" type="range" min="50" max="800" step="10" value="250"></label>
+
+  <h3>カメラで足を検出（センサーがないとき）</h3>
+  <p class="hint">床を映すようにカメラを置き、下のプレビューで黄色い枠を投影された鍵盤に合わせてください。枠の中を8等分し、動きがあった列の音が鳴ります。カメラを使っている間は、ふんでも鍵盤は光りません（光をカメラが足とまちがえるため）。</p>
+  <div class="row">
+    <button id="camBtn" type="button">カメラを使う</button>
+    <select id="camSelect" style="max-width:180px"></select>
+  </div>
+  <div id="camStatus"></div>
+  <canvas id="camPreview" width="320" height="240"></canvas>
+  <label>枠 左 <input id="cL" type="range" min="0" max="100" value="5"></label>
+  <label>枠 右 <input id="cR" type="range" min="0" max="100" value="95"></label>
+  <label>枠 上 <input id="cT" type="range" min="0" max="100" value="20"></label>
+  <label>枠 下 <input id="cB" type="range" min="0" max="100" value="80"></label>
+  <label>左右を反転 <input id="cFlip" type="checkbox"></label>
+  <label>感度 <input id="cSens" type="range" min="1" max="100" value="60"></label>
+
+  <h3>操作方法</h3>
+  <p class="hint">
+    ・タッチ／クリック（床用タッチセンサーや赤外線センサーはこれで動きます。何人で同時にふんでもOK）<br>
+    ・キーボード A S D F G H J K または 1〜8<br>
+    ・Esc キーでこの設定を開く／閉じる、F キーで全画面
+  </p>
+</div>
+
+<script>
+(() => {
+  // ---------- 鍵盤データ（C4〜C5） ----------
+  const KEYS = [
+    { kata: "ド",   hira: "ど",   freq: 261.63, color: "#ff4d4d" },
+    { kata: "レ",   hira: "れ",   freq: 293.66, color: "#ff9a2e" },
+    { kata: "ミ",   hira: "み",   freq: 329.63, color: "#ffd83a" },
+    { kata: "ファ", hira: "ふぁ", freq: 349.23, color: "#4fd76a" },
+    { kata: "ソ",   hira: "そ",   freq: 392.00, color: "#36c8f0" },
+    { kata: "ラ",   hira: "ら",   freq: 440.00, color: "#4d7dff" },
+    { kata: "シ",   hira: "し",   freq: 493.88, color: "#a65cff" },
+    { kata: "ド",   hira: "ど",   freq: 523.25, color: "#ff5cc0" },
+  ];
+  const KEYBOARD = ["a","s","d","f","g","h","j","k"];
+
+  const $ = (id) => document.getElementById(id);
+  const stage = $("stage");
+
+  // ---------- 設定（ブラウザに保存） ----------
+  const DEFAULTS = {
+    rot: "0", keyColor: "color", labelMode: "kata", nameSize: 9, glow: true,
+    vol: 0.8, tone: "piano", cool: 250,
+    cL: 5, cR: 95, cT: 20, cB: 80, cFlip: false, cSens: 60, camId: "",
+  };
+  let S = { ...DEFAULTS };
+  try { Object.assign(S, JSON.parse(localStorage.getItem("floorPiano") || "{}")); } catch (e) {}
+  const save = () => { try { localStorage.setItem("floorPiano", JSON.stringify(S)); } catch (e) {} };
+
+  // ---------- 鍵盤を描く ----------
+  const keyEls = KEYS.map((k, i) => {
+    const el = document.createElement("div");
+    el.className = "key";
+    el.dataset.i = i;
+    el.style.setProperty("--c", k.color);
+    el.innerHTML = `<div class="dot"></div><div class="name"></div>`;
+    stage.appendChild(el);
+    return el;
+  });
+
+  function applyView() {
+    document.body.classList.remove("rot90", "rot180", "rot270");
+    if (S.rot !== "0") document.body.classList.add("rot" + S.rot);
+    document.body.classList.toggle("white", S.keyColor === "white");
+    keyEls.forEach((el, i) => { el.querySelector(".name").textContent = KEYS[i][S.labelMode]; });
+    stage.style.setProperty("--name-size", S.nameSize + "vmin");
+  }
+
+  // ---------- 音 ----------
+  let ctx = null, master = null;
+  function initAudio() {
+    if (ctx) { ctx.resume(); return; }
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -12; comp.ratio.value = 4;
+    master = ctx.createGain();
+    master.gain.value = S.vol;
+    master.connect(comp).connect(ctx.destination);
+  }
+
+  // 音色ごとの倍音 [倍数, 音量] と減衰時間
+  const TONES = {
+    piano: { partials: [[1, 1], [2, 0.5], [3, 0.25], [4, 0.12], [5, 0.06]], decay: 1.8, type: "sine" },
+    bell:  { partials: [[1, 1], [2.76, 0.4], [5.4, 0.2], [8.9, 0.08]],       decay: 2.6, type: "sine" },
+    soft:  { partials: [[1, 1], [2, 0.15]],                                   decay: 1.2, type: "triangle" },
+  };
+
+  function playNote(freq) {
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    const tone = TONES[S.tone] || TONES.piano;
+    const out = ctx.createGain();
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.setValueAtTime(freq * 12, t);
+    lp.frequency.exponentialRampToValueAtTime(freq * 3, t + tone.decay);
+    out.connect(lp).connect(master);
+
+    out.gain.setValueAtTime(0.0001, t);
+    out.gain.exponentialRampToValueAtTime(0.35, t + 0.008);
+    out.gain.exponentialRampToValueAtTime(0.0001, t + tone.decay);
+
+    tone.partials.forEach(([mul, amp], n) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = tone.type;
+      o.frequency.value = freq * mul;
+      // 高い倍音ほど早く消える
+      g.gain.setValueAtTime(amp, t);
+      g.gain.exponentialRampToValueAtTime(Math.max(amp * 0.001, 0.0001), t + tone.decay / (1 + n * 0.6));
+      o.connect(g).connect(out);
+      o.start(t);
+      o.stop(t + tone.decay + 0.05);
+    });
+  }
+
+  // ---------- 鍵盤を鳴らす ----------
+  const lastHit = new Array(KEYS.length).fill(0);
+  const offTimers = new Array(KEYS.length).fill(0);
+  function hit(i) {
+    const now = performance.now();
+    if (now - lastHit[i] < S.cool) return;
+    lastHit[i] = now;
+    playNote(KEYS[i].freq);
+    // カメラ検出中に光らせると、その光をカメラが動きとまちがえて
+    // 隣の鍵盤が次々に鳴ってしまうので、カメラ使用中は光らせない
+    if (!S.glow || stream) return;
+    const el = keyEls[i];
+    el.classList.add("on");
+    clearTimeout(offTimers[i]);
+    offTimers[i] = setTimeout(() => el.classList.remove("on"), 180);
+  }
+
+  // ---------- タッチ・クリック（同時に何か所でもOK） ----------
+  const pointerKey = new Map();
+  const keyAt = (x, y) => {
+    const el = document.elementFromPoint(x, y);
+    const k = el && el.closest(".key");
+    return k ? +k.dataset.i : -1;
+  };
+  stage.addEventListener("pointerdown", (e) => {
+    initAudio();
+    const i = keyAt(e.clientX, e.clientY);
+    pointerKey.set(e.pointerId, i);
+    if (i >= 0) hit(i);
+  });
+  // 足をすべらせて隣の鍵盤に移ったときも鳴らす
+  window.addEventListener("pointermove", (e) => {
+    if (!pointerKey.has(e.pointerId)) return;
+    const i = keyAt(e.clientX, e.clientY);
+    if (i !== pointerKey.get(e.pointerId)) {
+      pointerKey.set(e.pointerId, i);
+      if (i >= 0) hit(i);
+    }
+  });
+  const up = (e) => pointerKey.delete(e.pointerId);
+  window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", up);
+  stage.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  // ---------- キーボード ----------
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { $("panel").classList.toggle("open"); return; }
+    if (e.target.closest && e.target.closest("#panel")) return;
+    if (e.repeat) return;
+    const k = e.key.toLowerCase();
+    let i = KEYBOARD.indexOf(k);
+    if (i < 0 && k >= "1" && k <= "8") i = +k - 1;
+    if (i >= 0) { initAudio(); hit(i); return; }
+    if (k === "f") toggleFullscreen();
+  });
+
+  // ---------- 設定パネル ----------
+  $("closeBtn").addEventListener("click", () => $("panel").classList.remove("open"));
+
+  function toggleFullscreen() {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {});
+    else document.exitFullscreen?.();
+  }
+  $("fsBtn").addEventListener("click", toggleFullscreen);
+  document.addEventListener("fullscreenchange", () => {
+    $("fsBtn").textContent = document.fullscreenElement ? "全画面をやめる" : "全画面にする";
+  });
+
+  // 設定の入力欄をつなぐ
+  const bind = (id, parse, after) => {
+    const el = $(id);
+    if (el.type === "checkbox") el.checked = S[id]; else el.value = S[id];
+    el.addEventListener("input", () => {
+      S[id] = el.type === "checkbox" ? el.checked : parse(el.value);
+      save();
+      after && after();
+    });
+  };
+  const str = (v) => v, num = (v) => +v;
+  bind("rot", str, applyView);
+  bind("keyColor", str, applyView);
+  bind("labelMode", str, applyView);
+  bind("nameSize", num, applyView);
+  bind("glow", null);
+  bind("vol", num, () => { if (master) master.gain.value = S.vol; });
+  bind("tone", str);
+  bind("cool", num);
+  ["cL", "cR", "cT", "cB", "cSens"].forEach((id) => bind(id, num));
+  bind("cFlip", null);
+
+  applyView();
+
+  // ---------- カメラで足を検出 ----------
+  const W = 160, H = 120;          // 解析用の小さな画像サイズ
+  const video = document.createElement("video");
+  video.muted = true; video.playsInline = true;
+  const work = document.createElement("canvas");
+  work.width = W; work.height = H;
+  const wctx = work.getContext("2d", { willReadFrequently: true });
+  const prev = $("camPreview"), pctx = prev.getContext("2d");
+  let stream = null, prevGray = null;
+  const level = new Array(KEYS.length).fill(0);
+  const active = new Array(KEYS.length).fill(false);
+
+  async function listCameras() {
+    try {
+      const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+      const sel = $("camSelect");
+      sel.innerHTML = devs.map((d, n) => `<option value="${d.deviceId}">${d.label || "カメラ " + (n + 1)}</option>`).join("");
+      if (S.camId && devs.some((d) => d.deviceId === S.camId)) sel.value = S.camId;
+    } catch (e) {}
+  }
+
+  async function startCamera() {
+    stopCamera();
+    $("camStatus").textContent = "カメラを起動中…";
+    try {
+      const id = $("camSelect").value || S.camId;
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: id ? { deviceId: { exact: id }, width: 640, height: 480 } : { width: 640, height: 480 },
+        audio: false,
+      });
+      video.srcObject = stream;
+      await video.play();
+      const track = stream.getVideoTracks()[0];
+      S.camId = track.getSettings().deviceId || "";
+      save();
+      await listCameras();
+      $("camBtn").textContent = "カメラを止める";
+      $("camStatus").textContent = "検出中：" + track.label;
+      prevGray = null;
+      requestAnimationFrame(camLoop);
+    } catch (e) {
+      $("camStatus").textContent = "カメラを使えませんでした（" + e.name + "）";
+      stream = null;
+    }
+  }
+  function stopCamera() {
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    stream = null;
+    $("camBtn").textContent = "カメラを使う";
+  }
+  $("camBtn").addEventListener("click", () => { initAudio(); stream ? (stopCamera(), $("camStatus").textContent = "") : startCamera(); });
+  $("camSelect").addEventListener("change", () => { S.camId = $("camSelect").value; save(); if (stream) startCamera(); });
+
+  function camLoop() {
+    if (!stream) return;
+    requestAnimationFrame(camLoop);
+    if (video.readyState < 2) return;
+
+    wctx.drawImage(video, 0, 0, W, H);
+    const px = wctx.getImageData(0, 0, W, H).data;
+    const gray = new Uint8Array(W * H);
+    for (let p = 0, q = 0; p < gray.length; p++, q += 4) {
+      gray[p] = (px[q] * 77 + px[q + 1] * 150 + px[q + 2] * 29) >> 8;
+    }
+
+    // 枠の範囲
+    const x0 = Math.round(Math.min(S.cL, S.cR) / 100 * W), x1 = Math.round(Math.max(S.cL, S.cR) / 100 * W);
+    const y0 = Math.round(Math.min(S.cT, S.cB) / 100 * H), y1 = Math.round(Math.max(S.cT, S.cB) / 100 * H);
+    const colW = Math.max(1, (x1 - x0) / KEYS.length);
+
+    if (prevGray && x1 > x0 && y1 > y0) {
+      const sum = new Array(KEYS.length).fill(0), cnt = new Array(KEYS.length).fill(0);
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const p = y * W + x;
+          // 明るさの変化が小さいもの（ノイズ・投影のちらつき）は数えない
+          const d = Math.abs(gray[p] - prevGray[p]);
+          let c = Math.min(KEYS.length - 1, Math.floor((x - x0) / colW));
+          if (S.cFlip) c = KEYS.length - 1 - c;
+          sum[c] += d > 25 ? 1 : 0;
+          cnt[c]++;
+        }
+      }
+      // 感度が高いほど、少ない動きで反応する
+      const th = 0.02 + (100 - S.cSens) / 100 * 0.25;
+      for (let c = 0; c < KEYS.length; c++) level[c] = cnt[c] ? sum[c] / cnt[c] : 0;
+      // 半分以上の列が同時に変わったときは、足ではなく照明やカメラの明るさ調整なので無視
+      const busy = level.filter((v) => v > th).length >= KEYS.length / 2;
+      for (let c = 0; c < KEYS.length; c++) {
+        const v = busy ? 0 : level[c];
+        if (!active[c] && v > th) { active[c] = true; hit(c); }
+        else if (active[c] && v < th * 0.4) active[c] = false;
+      }
+    }
+    prevGray = gray;
+
+    // パネルが開いているときだけプレビューを描く
+    if (!$("panel").classList.contains("open")) return;
+    const sx = prev.width / W, sy = prev.height / H;
+    pctx.drawImage(video, 0, 0, prev.width, prev.height);
+    pctx.strokeStyle = "#ffd83a"; pctx.lineWidth = 2;
+    pctx.strokeRect(x0 * sx, y0 * sy, (x1 - x0) * sx, (y1 - y0) * sy);
+    const th = 0.02 + (100 - S.cSens) / 100 * 0.25;
+    for (let c = 0; c < KEYS.length; c++) {
+      const kc = S.cFlip ? KEYS.length - 1 - c : c;
+      const cx = (x0 + c * colW) * sx, cw = colW * sx;
+      if (c > 0) { pctx.beginPath(); pctx.moveTo(cx, y0 * sy); pctx.lineTo(cx, y1 * sy); pctx.stroke(); }
+      const h = Math.min(1, level[kc] / th) * (y1 - y0) * sy;
+      pctx.fillStyle = active[kc] ? KEYS[kc].color : "rgba(255,255,255,0.35)";
+      pctx.fillRect(cx + 2, y1 * sy - h, cw - 4, h);
+      pctx.fillStyle = "#fff"; pctx.font = "bold 14px sans-serif"; pctx.textAlign = "center";
+      pctx.fillText(KEYS[kc][S.labelMode], cx + cw / 2, y0 * sy + 16);
+    }
+  }
+
+  if (navigator.mediaDevices?.enumerateDevices) listCameras();
+})();
+</script>
+</body>
+</html>
