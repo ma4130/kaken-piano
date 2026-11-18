@@ -104,6 +104,12 @@
   #panel .hint { color: #999; font-size: 12px; }
   #camPreview { width: 100%; background: #000; border-radius: 6px; margin-top: 8px; display: block; }
   #camStatus { color: #9cf; font-size: 12px; min-height: 1em; }
+  [hidden] { display: none !important; }
+
+  /* 自動位置合わせ中：光らせる鍵盤だけ真っ白、ほかは真っ黒 */
+  body.calib .key { background: #000 !important; border-color: #000 !important; transform: none !important; transition: none !important; }
+  body.calib .key > * { visibility: hidden; }
+  body.calib .key.calib-on { background: #fff !important; border-color: #fff !important; }
 </style>
 </head>
 <body class="hide-cursor">
@@ -154,18 +160,24 @@
   <label>連続で鳴る間隔（ms） <input id="cool" type="range" min="50" max="800" step="10" value="250"></label>
 
   <h3>カメラで足を検出（センサーがないとき）</h3>
-  <p class="hint">床を映すようにカメラを置き、下のプレビューで黄色い枠を投影された鍵盤に合わせてください。枠の中を8等分し、動きがあった列の音が鳴ります。カメラを使っている間は、ふんでも鍵盤は光りません（光をカメラが足とまちがえるため）。</p>
+  <p class="hint">床を映すようにカメラを置いて「カメラを使う」→「自動で位置合わせ」を押してください。鍵盤が1つずつ白く光り、カメラ映像のどこがどの鍵盤かを自動で覚えます（約6秒。その間は鍵盤の上に立たないでください）。プレビューの色分けが鍵盤と合っていればOKです。カメラを使っている間は、ふんでも鍵盤は光りません（光をカメラが足とまちがえるため）。</p>
   <div class="row">
     <button id="camBtn" type="button">カメラを使う</button>
     <select id="camSelect" style="max-width:180px"></select>
   </div>
+  <div class="row">
+    <button id="calibBtn" type="button">自動で位置合わせ</button>
+    <button id="resetMapBtn" type="button" hidden>手動の枠に戻す</button>
+  </div>
   <div id="camStatus"></div>
   <canvas id="camPreview" width="320" height="240"></canvas>
-  <label>枠 左 <input id="cL" type="range" min="0" max="100" value="5"></label>
-  <label>枠 右 <input id="cR" type="range" min="0" max="100" value="95"></label>
-  <label>枠 上 <input id="cT" type="range" min="0" max="100" value="20"></label>
-  <label>枠 下 <input id="cB" type="range" min="0" max="100" value="80"></label>
-  <label>左右を反転 <input id="cFlip" type="checkbox"></label>
+  <div id="manualBox">
+    <label>枠 左 <input id="cL" type="range" min="0" max="100" value="5"></label>
+    <label>枠 右 <input id="cR" type="range" min="0" max="100" value="95"></label>
+    <label>枠 上 <input id="cT" type="range" min="0" max="100" value="20"></label>
+    <label>枠 下 <input id="cB" type="range" min="0" max="100" value="80"></label>
+    <label>左右を反転 <input id="cFlip" type="checkbox"></label>
+  </div>
   <label>感度 <input id="cSens" type="range" min="1" max="100" value="60"></label>
 
   <h3>操作方法</h3>
@@ -375,6 +387,62 @@
   const level = new Array(KEYS.length).fill(0);
   const active = new Array(KEYS.length).fill(false);
 
+  // 画像の各点がどの鍵盤か（-1 = どれでもない）。自動位置合わせで作る
+  let keyMap = null, calibrating = false;
+  const MAP_KEY = "floorPianoCamMap";
+  try {
+    const s = localStorage.getItem(MAP_KEY);
+    if (s && s.length === W * H) keyMap = Int8Array.from(s, (ch) => (ch === "." ? -1 : ch.charCodeAt(0) - 48));
+  } catch (e) {}
+  const saveMap = () => {
+    try {
+      if (keyMap) localStorage.setItem(MAP_KEY, Array.from(keyMap, (v) => (v < 0 ? "." : String.fromCharCode(48 + v))).join(""));
+      else localStorage.removeItem(MAP_KEY);
+    } catch (e) {}
+  };
+
+  // 手動の枠（スライダー）から作る対応表
+  let rectCache = { key: "", map: null };
+  function rectMap() {
+    const key = [S.cL, S.cR, S.cT, S.cB, S.cFlip].join();
+    if (rectCache.key === key) return rectCache.map;
+    const map = new Int8Array(W * H).fill(-1);
+    const x0 = Math.round(Math.min(S.cL, S.cR) / 100 * W), x1 = Math.round(Math.max(S.cL, S.cR) / 100 * W);
+    const y0 = Math.round(Math.min(S.cT, S.cB) / 100 * H), y1 = Math.round(Math.max(S.cT, S.cB) / 100 * H);
+    const colW = Math.max(1, (x1 - x0) / KEYS.length);
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+      let c = Math.min(KEYS.length - 1, Math.floor((x - x0) / colW));
+      if (S.cFlip) c = KEYS.length - 1 - c;
+      map[y * W + x] = c;
+    }
+    rectCache = { key, map };
+    return map;
+  }
+  const currentMap = () => keyMap || rectMap();
+
+  // プレビューに重ねる色分け画像
+  const mapCanvas = document.createElement("canvas");
+  mapCanvas.width = W; mapCanvas.height = H;
+  let mapCanvasFor = null;
+  function drawMapCanvas(map) {
+    if (mapCanvasFor === map) return;
+    mapCanvasFor = map;
+    const mctx = mapCanvas.getContext("2d");
+    const img = mctx.createImageData(W, H);
+    const rgb = KEYS.map((k) => [1, 3, 5].map((n) => parseInt(k.color.slice(n, n + 2), 16)));
+    for (let p = 0; p < map.length; p++) {
+      if (map[p] < 0) continue;
+      const [r, g, b] = rgb[map[p]];
+      img.data.set([r, g, b, 110], p * 4);
+    }
+    mctx.putImageData(img, 0, 0);
+  }
+
+  function updateCalibUI() {
+    $("manualBox").hidden = !!keyMap;
+    $("resetMapBtn").hidden = !keyMap;
+  }
+
   async function listCameras() {
     try {
       const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
@@ -400,7 +468,7 @@
       save();
       await listCameras();
       $("camBtn").textContent = "カメラを止める";
-      $("camStatus").textContent = "検出中：" + track.label;
+      $("camStatus").textContent = "検出中：" + track.label + (keyMap ? "" : "（「自動で位置合わせ」をおすすめします）");
       prevGray = null;
       requestAnimationFrame(camLoop);
     } catch (e) {
@@ -416,40 +484,116 @@
   $("camBtn").addEventListener("click", () => { initAudio(); stream ? (stopCamera(), $("camStatus").textContent = "") : startCamera(); });
   $("camSelect").addEventListener("change", () => { S.camId = $("camSelect").value; save(); if (stream) startCamera(); });
 
-  function camLoop() {
-    if (!stream) return;
-    requestAnimationFrame(camLoop);
-    if (video.readyState < 2) return;
-
+  function grabGray() {
     wctx.drawImage(video, 0, 0, W, H);
     const px = wctx.getImageData(0, 0, W, H).data;
     const gray = new Uint8Array(W * H);
     for (let p = 0, q = 0; p < gray.length; p++, q += 4) {
       gray[p] = (px[q] * 77 + px[q + 1] * 150 + px[q + 2] * 29) >> 8;
     }
+    return gray;
+  }
 
-    // 枠の範囲
-    const x0 = Math.round(Math.min(S.cL, S.cR) / 100 * W), x1 = Math.round(Math.max(S.cL, S.cR) / 100 * W);
-    const y0 = Math.round(Math.min(S.cT, S.cB) / 100 * H), y1 = Math.round(Math.max(S.cT, S.cB) / 100 * H);
-    const colW = Math.max(1, (x1 - x0) / KEYS.length);
+  // ---------- 自動位置合わせ ----------
+  // 鍵盤を1つずつ白く光らせ、カメラ映像で明るくなった場所をその鍵盤として覚える
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  async function captureAvg(n = 5) {
+    const acc = new Float32Array(W * H);
+    for (let k = 0; k < n; k++) {
+      await sleep(40);
+      const g = grabGray();
+      for (let p = 0; p < acc.length; p++) acc[p] += g[p];
+    }
+    for (let p = 0; p < acc.length; p++) acc[p] /= n;
+    return acc;
+  }
 
-    if (prevGray && x1 > x0 && y1 > y0) {
-      const sum = new Array(KEYS.length).fill(0), cnt = new Array(KEYS.length).fill(0);
-      for (let y = y0; y < y1; y++) {
-        for (let x = x0; x < x1; x++) {
-          const p = y * W + x;
-          // 明るさの変化が小さいもの（ノイズ・投影のちらつき）は数えない
-          const d = Math.abs(gray[p] - prevGray[p]);
-          let c = Math.min(KEYS.length - 1, Math.floor((x - x0) / colW));
-          if (S.cFlip) c = KEYS.length - 1 - c;
-          sum[c] += d > 25 ? 1 : 0;
-          cnt[c]++;
-        }
+  async function autoCalibrate() {
+    if (!stream || calibrating) {
+      if (!stream) $("camStatus").textContent = "先に「カメラを使う」を押してください";
+      return;
+    }
+    calibrating = true;
+    const panel = $("panel");
+    panel.classList.remove("open");
+    document.body.classList.add("calib");
+    const setLit = (i) => keyEls.forEach((el, j) => el.classList.toggle("calib-on", j === i));
+    try {
+      setLit(-1);
+      await sleep(900);                       // カメラの明るさが落ち着くのを待つ
+      const dark = await captureAvg();
+      const diffs = [];
+      for (let i = 0; i < KEYS.length; i++) {
+        setLit(i);
+        await sleep(450);
+        const g = await captureAvg();
+        const d = new Float32Array(W * H);
+        for (let p = 0; p < d.length; p++) d[p] = g[p] - dark[p];
+        diffs.push(d);
       }
-      // 感度が高いほど、少ない動きで反応する
-      const th = 0.02 + (100 - S.cSens) / 100 * 0.25;
+      setLit(-1);
+
+      // いちばん明るくなった鍵盤をその点の鍵盤にする（はっきりしない点は使わない）
+      const map = new Int8Array(W * H).fill(-1);
+      const count = new Array(KEYS.length).fill(0);
+      for (let p = 0; p < map.length; p++) {
+        let best = -1, bv = 0, sv = 0;
+        for (let i = 0; i < KEYS.length; i++) {
+          const v = diffs[i][p];
+          if (v > bv) { sv = bv; bv = v; best = i; } else if (v > sv) sv = v;
+        }
+        if (best >= 0 && bv >= 18 && bv > sv * 1.6) { map[p] = best; count[best]++; }
+      }
+      const missing = KEYS.map((k, i) => (count[i] < 15 ? k.kata : null)).filter(Boolean);
+      if (missing.length > KEYS.length / 2) {
+        $("camStatus").textContent = "うまく位置合わせできませんでした。カメラに投影が映っているか、部屋が明るすぎないか確認してください。";
+      } else {
+        keyMap = map;
+        saveMap();
+        $("camStatus").textContent = missing.length
+          ? "位置合わせしました。ただし " + missing.join("・") + " がカメラにほとんど映っていません。"
+          : "位置合わせしました。プレビューの色分けが鍵盤と合っているか確認してください。";
+      }
+    } finally {
+      document.body.classList.remove("calib");
+      setLit(-1);
+      prevGray = null;
+      active.fill(false);
+      calibrating = false;
+      updateCalibUI();
+      panel.classList.add("open");
+    }
+  }
+  $("calibBtn").addEventListener("click", autoCalibrate);
+  $("resetMapBtn").addEventListener("click", () => {
+    keyMap = null;
+    saveMap();
+    updateCalibUI();
+    $("camStatus").textContent = "手動の枠に戻しました";
+  });
+  updateCalibUI();
+
+  function camLoop() {
+    if (!stream) return;
+    requestAnimationFrame(camLoop);
+    if (video.readyState < 2 || calibrating) return;
+
+    const gray = grabGray();
+    const map = currentMap();
+    // 感度が高いほど、少ない動きで反応する
+    const th = 0.02 + (100 - S.cSens) / 100 * 0.25;
+
+    if (prevGray) {
+      const sum = new Array(KEYS.length).fill(0), cnt = new Array(KEYS.length).fill(0);
+      for (let p = 0; p < map.length; p++) {
+        const c = map[p];
+        if (c < 0) continue;
+        // 明るさの変化が小さいもの（ノイズ・投影のちらつき）は数えない
+        if (Math.abs(gray[p] - prevGray[p]) > 25) sum[c]++;
+        cnt[c]++;
+      }
       for (let c = 0; c < KEYS.length; c++) level[c] = cnt[c] ? sum[c] / cnt[c] : 0;
-      // 半分以上の列が同時に変わったときは、足ではなく照明やカメラの明るさ調整なので無視
+      // 半分以上の鍵盤が同時に変わったときは、足ではなく照明やカメラの明るさ調整なので無視
       const busy = level.filter((v) => v > th).length >= KEYS.length / 2;
       for (let c = 0; c < KEYS.length; c++) {
         const v = busy ? 0 : level[c];
@@ -461,20 +605,22 @@
 
     // パネルが開いているときだけプレビューを描く
     if (!$("panel").classList.contains("open")) return;
-    const sx = prev.width / W, sy = prev.height / H;
+    pctx.imageSmoothingEnabled = true;
     pctx.drawImage(video, 0, 0, prev.width, prev.height);
-    pctx.strokeStyle = "#ffd83a"; pctx.lineWidth = 2;
-    pctx.strokeRect(x0 * sx, y0 * sy, (x1 - x0) * sx, (y1 - y0) * sy);
-    const th = 0.02 + (100 - S.cSens) / 100 * 0.25;
+    drawMapCanvas(map);
+    pctx.imageSmoothingEnabled = false;
+    pctx.drawImage(mapCanvas, 0, 0, prev.width, prev.height);
+    // 下に鍵盤ごとの動きの量を表示
+    const bw = prev.width / KEYS.length, bh = 36, by = prev.height - bh;
+    pctx.fillStyle = "rgba(0,0,0,0.6)";
+    pctx.fillRect(0, by, prev.width, bh);
+    pctx.font = "bold 12px sans-serif"; pctx.textAlign = "center";
     for (let c = 0; c < KEYS.length; c++) {
-      const kc = S.cFlip ? KEYS.length - 1 - c : c;
-      const cx = (x0 + c * colW) * sx, cw = colW * sx;
-      if (c > 0) { pctx.beginPath(); pctx.moveTo(cx, y0 * sy); pctx.lineTo(cx, y1 * sy); pctx.stroke(); }
-      const h = Math.min(1, level[kc] / th) * (y1 - y0) * sy;
-      pctx.fillStyle = active[kc] ? KEYS[kc].color : "rgba(255,255,255,0.35)";
-      pctx.fillRect(cx + 2, y1 * sy - h, cw - 4, h);
-      pctx.fillStyle = "#fff"; pctx.font = "bold 14px sans-serif"; pctx.textAlign = "center";
-      pctx.fillText(KEYS[kc][S.labelMode], cx + cw / 2, y0 * sy + 16);
+      const h = Math.min(1, level[c] / th) * (bh - 14);
+      pctx.fillStyle = active[c] ? KEYS[c].color : "rgba(255,255,255,0.4)";
+      pctx.fillRect(c * bw + 3, prev.height - h, bw - 6, h);
+      pctx.fillStyle = "#fff";
+      pctx.fillText(KEYS[c][S.labelMode], c * bw + bw / 2, by + 12);
     }
   }
 
