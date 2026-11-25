@@ -160,7 +160,7 @@
   <label>連続で鳴る間隔（ms） <input id="cool" type="range" min="50" max="800" step="10" value="250"></label>
 
   <h3>カメラで足を検出（センサーがないとき）</h3>
-  <p class="hint">床を映すようにカメラを置いて「カメラを使う」→「自動で位置合わせ」を押してください。鍵盤が1つずつ白く光り、カメラ映像のどこがどの鍵盤かを自動で覚えます（約6秒。その間は鍵盤の上に立たないでください）。プレビューの色分けが鍵盤と合っていればOKです。カメラを使っている間は、ふんでも鍵盤は光りません（光をカメラが足とまちがえるため）。</p>
+  <p class="hint">床を映すようにカメラを置いて「カメラを使う」→「自動で位置合わせ」を押してください。鍵盤が1つずつ白く光り、カメラ映像のどこがどの鍵盤かを自動で覚えます（約6秒。その間は鍵盤の上に立たないでください）。プレビューの色分けが鍵盤と合っていればOKです。だれもいない床を覚えて、それと違う所（足）を白く表示します。足がないのに白い所が多いときは、鍵盤の上にだれもいないときに「床を覚えなおす」を押してください。カメラを使っている間は、ふんでも鍵盤は光りません（光をカメラが足とまちがえるため）。</p>
   <div class="row">
     <button id="camBtn" type="button">カメラを使う</button>
     <select id="camSelect" style="max-width:180px"></select>
@@ -168,6 +168,7 @@
   <div class="row">
     <button id="calibBtn" type="button">自動で位置合わせ</button>
     <button id="resetMapBtn" type="button" hidden>手動の枠に戻す</button>
+    <button id="bgBtn" type="button">床を覚えなおす</button>
   </div>
   <div id="camStatus"></div>
   <canvas id="camPreview" width="320" height="240"></canvas>
@@ -179,6 +180,7 @@
     <label>左右を反転 <input id="cFlip" type="checkbox"></label>
   </div>
   <label>感度 <input id="cSens" type="range" min="1" max="100" value="60"></label>
+  <label>カメラの明るさを固定 <input id="camLock" type="checkbox" checked></label>
 
   <h3>操作方法</h3>
   <p class="hint">
@@ -210,7 +212,7 @@
   const DEFAULTS = {
     rot: "0", keyColor: "color", labelMode: "kata", nameSize: 9, glow: true,
     vol: 0.8, tone: "piano", cool: 250,
-    cL: 5, cR: 95, cT: 20, cB: 80, cFlip: false, cSens: 60, camId: "",
+    cL: 5, cR: 95, cT: 20, cB: 80, cFlip: false, cSens: 60, camId: "", camLock: true,
   };
   let S = { ...DEFAULTS };
   try { Object.assign(S, JSON.parse(localStorage.getItem("floorPiano") || "{}")); } catch (e) {}
@@ -372,6 +374,12 @@
   bind("cool", num);
   ["cL", "cR", "cT", "cB", "cSens"].forEach((id) => bind(id, num));
   bind("cFlip", null);
+  bind("camLock", null, async () => {
+    if (!stream) return;
+    const msg = await setCameraLock(S.camLock);
+    if (msg) $("camStatus").textContent = msg;
+    relearnBg();
+  });
 
   applyView();
 
@@ -383,7 +391,7 @@
   work.width = W; work.height = H;
   const wctx = work.getContext("2d", { willReadFrequently: true });
   const prev = $("camPreview"), pctx = prev.getContext("2d");
-  let stream = null, prevGray = null;
+  let stream = null;
   const level = new Array(KEYS.length).fill(0);
   const active = new Array(KEYS.length).fill(false);
 
@@ -469,8 +477,16 @@
       await listCameras();
       $("camBtn").textContent = "カメラを止める";
       $("camStatus").textContent = "検出中：" + track.label + (keyMap ? "" : "（「自動で位置合わせ」をおすすめします）");
-      prevGray = null;
+      relearnBg();
       requestAnimationFrame(camLoop);
+      // カメラの明るさが落ち着いてから固定して、床を覚えなおす
+      const startedStream = stream;
+      setTimeout(async () => {
+        if (stream !== startedStream) return;
+        const msg = S.camLock ? await setCameraLock(true) : "";
+        if (msg) $("camStatus").textContent += msg;
+        relearnBg();
+      }, 1500);
     } catch (e) {
       $("camStatus").textContent = "カメラを使えませんでした（" + e.name + "）";
       stream = null;
@@ -557,8 +573,8 @@
     } finally {
       document.body.classList.remove("calib");
       setLit(-1);
-      prevGray = null;
-      active.fill(false);
+      await sleep(600);                       // ふつうの表示に戻ってから床を覚える
+      relearnBg();
       calibrating = false;
       updateCalibUI();
       panel.classList.add("open");
@@ -573,6 +589,46 @@
   });
   updateCalibUI();
 
+  // ---------- 背景（だれもいない床）との比較 ----------
+  // 動きではなく「覚えた床と違う所」を足とみなすので、止まった足も分かり、ノイズにも強い
+  let bg = null, bgWarm = 0, busyFrames = 0;
+  const over = new Array(KEYS.length).fill(0);
+  const fgImgCanvas = document.createElement("canvas");
+  fgImgCanvas.width = W; fgImgCanvas.height = H;
+  function relearnBg() {
+    bg = null;
+    bgWarm = 20;              // 20コマかけて床を覚える（その間は鳴らさない）
+    active.fill(false);
+    over.fill(0);
+  }
+  $("bgBtn").addEventListener("click", () => {
+    relearnBg();
+    $("camStatus").textContent = "床を覚えなおしました（鍵盤の上にだれもいないときに押してください）";
+  });
+
+  // カメラの自動の明るさ・色の調整を止める（投影の光で明るさが変わって誤反応するのを防ぐ）
+  async function setCameraLock(on) {
+    const track = stream && stream.getVideoTracks()[0];
+    if (!track || !track.getCapabilities) return "";
+    const caps = track.getCapabilities(), set = track.getSettings(), adv = {};
+    const can = (list, mode) => Array.isArray(list) && list.includes(mode);
+    if (can(caps.exposureMode, "manual")) {
+      adv.exposureMode = on ? "manual" : "continuous";
+      if (on && set.exposureTime) adv.exposureTime = set.exposureTime;
+    }
+    if (can(caps.whiteBalanceMode, "manual")) {
+      adv.whiteBalanceMode = on ? "manual" : "continuous";
+      if (on && set.colorTemperature) adv.colorTemperature = set.colorTemperature;
+    }
+    if (!Object.keys(adv).length) return on ? "（このカメラは明るさの固定に対応していません）" : "";
+    try {
+      await track.applyConstraints({ advanced: [adv] });
+      return on ? "（明るさを固定しました）" : "";
+    } catch (e) {
+      return on ? "（明るさを固定できませんでした）" : "";
+    }
+  }
+
   function camLoop() {
     if (!stream) return;
     requestAnimationFrame(camLoop);
@@ -580,28 +636,44 @@
 
     const gray = grabGray();
     const map = currentMap();
-    // 感度が高いほど、少ない動きで反応する
-    const th = 0.02 + (100 - S.cSens) / 100 * 0.25;
+    // 感度が高いほど、小さな足でも反応する（鍵盤の面積に対する足の割合）
+    const th = 0.005 + (100 - S.cSens) / 100 * 0.06;
 
-    if (prevGray) {
+    if (!bg) bg = Float32Array.from(gray);
+    const fg = new Uint8Array(W * H);
+    if (bgWarm > 0) {
+      for (let p = 0; p < gray.length; p++) bg[p] += (gray[p] - bg[p]) * 0.3;
+      bgWarm--;
+    } else {
+      for (let p = 0; p < gray.length; p++) {
+        if (map[p] >= 0 && Math.abs(gray[p] - bg[p]) > 28) fg[p] = 1;
+      }
       const sum = new Array(KEYS.length).fill(0), cnt = new Array(KEYS.length).fill(0);
       for (let p = 0; p < map.length; p++) {
         const c = map[p];
         if (c < 0) continue;
-        // 明るさの変化が小さいもの（ノイズ・投影のちらつき）は数えない
-        if (Math.abs(gray[p] - prevGray[p]) > 25) sum[c]++;
         cnt[c]++;
+        // 右と下も違っている点だけ数える（点のようなノイズを無視）
+        if (fg[p] && fg[p + 1] && fg[p + W]) sum[c]++;
       }
       for (let c = 0; c < KEYS.length; c++) level[c] = cnt[c] ? sum[c] / cnt[c] : 0;
-      // 半分以上の鍵盤が同時に変わったときは、足ではなく照明やカメラの明るさ調整なので無視
+
+      // 半分以上の鍵盤が同時に変わったのは、照明が変わったかカメラが動いたので、床を覚えなおす
       const busy = level.filter((v) => v > th).length >= KEYS.length / 2;
+      busyFrames = busy ? busyFrames + 1 : 0;
+      if (busyFrames > 20) { busyFrames = 0; relearnBg(); return; }
+
       for (let c = 0; c < KEYS.length; c++) {
         const v = busy ? 0 : level[c];
-        if (!active[c] && v > th) { active[c] = true; hit(c); }
-        else if (active[c] && v < th * 0.4) active[c] = false;
+        // 2コマ続けて足があったら鳴らす（一瞬のノイズでは鳴らない）
+        over[c] = v > th ? over[c] + 1 : 0;
+        if (!active[c] && over[c] >= 2) { active[c] = true; hit(c); }
+        else if (active[c] && v < th * 0.5) active[c] = false;
       }
+
+      // 床はゆっくり覚えなおす（足がある所はもっとゆっくり）
+      for (let p = 0; p < gray.length; p++) bg[p] += (gray[p] - bg[p]) * (fg[p] ? 0.0015 : 0.03);
     }
-    prevGray = gray;
 
     // パネルが開いているときだけプレビューを描く
     if (!$("panel").classList.contains("open")) return;
@@ -610,7 +682,13 @@
     drawMapCanvas(map);
     pctx.imageSmoothingEnabled = false;
     pctx.drawImage(mapCanvas, 0, 0, prev.width, prev.height);
-    // 下に鍵盤ごとの動きの量を表示
+    // 足とみなした所を白く表示
+    const fctx = fgImgCanvas.getContext("2d");
+    const img = fctx.createImageData(W, H);
+    for (let p = 0; p < fg.length; p++) if (fg[p]) img.data.set([255, 255, 255, 220], p * 4);
+    fctx.putImageData(img, 0, 0);
+    pctx.drawImage(fgImgCanvas, 0, 0, prev.width, prev.height);
+    // 下に鍵盤ごとの足の量を表示
     const bw = prev.width / KEYS.length, bh = 36, by = prev.height - bh;
     pctx.fillStyle = "rgba(0,0,0,0.6)";
     pctx.fillRect(0, by, prev.width, bh);
